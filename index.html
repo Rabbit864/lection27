@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+
+    <title>reveal.js</title>
+
+    <link rel="stylesheet" href="dist/reset.css" />
+    <link rel="stylesheet" href="dist/reveal.css" />
+    <link rel="stylesheet" href="dist/theme/black.css" />
+    <style>
+      p,
+      li {
+        font-size: 32px;
+      }
+    </style>
+
+    <!-- Theme used for syntax highlighted code -->
+    <link rel="stylesheet" href="plugin/highlight/monokai.css" />
+  </head>
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <section>
+          <div>
+            <h1>Задачи и очереди</h1>
+          </div>
+        </section>
+        <section>
+          <h3>Начнем с небольшого примера</h3>
+          <p>
+            Приложение будет очень простым. Оно позволит нам отслеживать трафик
+            нашего сайта.
+          </p>
+          <p>
+            Сайт будет отправлять POST-запрос на конкретную конечную точку
+            нашего аналитического инструмента каждый раз, когда пользователь
+            заходит на одну из его страниц. Затем мы вычисляем время,
+            потраченное на каждую страницу, вычитая временные метки двух
+            последовательных POST-запросов.
+          </p>
+        </section>
+        <section>
+          <h3>Обговорим самый первый шаг</h3>
+          <p>
+            Давайте сосредоточимся на хранении этих заходов в базе данных. Все,
+            что нам нужно, это конечная точка и контроллер.
+          </p>
+        </section>
+        <section>
+          <h3>Сущности</h3>
+          <p>
+            Во-первых, давайте создадим две основные модели, которые нам
+            понадобятся, и их соответствующие миграции.
+          </p>
+          <ul>
+            <li>
+              Tracker: у каждого сайта будет свой уникальный трекер. Сейчас нам
+              просто нужно убедиться, что ID трекера является валидным (то есть
+              существует в базе данных) и уникальным.
+            </li>
+            <li>Hit: каждый POST-запрос будет сохранен как «Hit»</li>
+          </ul>
+        </section>
+        <section>
+          <h3>Рассмотрим наш контроллер</h3>
+          <pre>
+        <code data-line-numbers="" style="color:white">class TrackingController extends Controller
+{
+  public function track($tracker_public_id, Request $request)
+  {
+      $tracker = Tracker::where('public_id', $tracker_public_id)->first();
+      if ($tracker) {
+          $url = $request->get('url');
+          $hit = Hit::create(['tracker_id' => $tracker->id, 'url' => $url]);
+          $previousHit = Hit::where('tracker_id', $tracker->id)->orderBy('id', 'desc')->skip(1)->first();
+          if ($previousHit) {
+              $previousHit->seconds = $hit->created_at->diffInSeconds($previousHit->created_at);
+              $previousHit->save();
+              return $previousHit->seconds;
+          }
+          return 0;
+      }
+      return -1;
+  }
+}</code>
+      </pre>
+        </section>
+        <section>
+          <h3>Что может пойти не так?</h3>
+          <p>
+            Но давайте представим варианты, когда этот код уже не будет
+            достаточно хорош или просто сломается.
+          </p>
+        </section>
+        <section>
+          <h3>Время отклика</h3>
+          <p>
+            Допустим, что скрипт, который отправляет эти запросы, должен по той
+            или иной причине дождаться подтверждения, что запрос получен
+          </p>
+        </section>
+        <section>
+          <h3>Время отклика</h3>
+          <p>Запрос в postman</p>
+          <img src="img/postman.png" alt="" />
+        </section>
+        <section>
+          <h3>Время отклика</h3>
+          <p>
+            100 мс — это довольно долго, хотя мы в контроллере и не выполняем
+            никакой существенной обработки. А представьте, что нам нужно
+            выполнить дополнительные действия, плюс несколько запросов к базе
+            данных или даже пообщаться со сторонним API. То есть мы заблокируем
+            скрипт, отправляющий нам запрос (и возможно даже страницу, на
+            которой выполняется этот скрипт), до тех пор пока мы не закончим
+            обработку.
+          </p>
+        </section>
+        <section>
+          <h3>Количество одновременных запросов</h3>
+          <p>
+            Неважно, запускаете ли вы приложение локально или на продакшене,
+            всегда существует лимит на количества запросов, которые вы можете
+            обработать.
+          </p>
+        </section>
+        <section>
+          <h3>Количество одновременных запросов</h3>
+          <p>
+            Если вы используете локальный сервер и запускаете свое приложение
+            через php artisan serve, то вы заметите, что сервер может
+            обрабатывать только один запрос за раз.
+          </p>
+        </section>
+        <section>
+          <h3>Количество одновременных запросов</h3>
+          <p>
+            Если мы выполняем наш код синхронно, как сейчас, это означает, что
+            мы чаще будем утыкаться в этот лимит, так как сохраняем
+            загруженность вебсервера. Вскоре мы заметим, что множество запросов
+            просто отваливается по таймауту. Чтобы решить это нам нужно как
+            можно скорее освобождать соединение.
+          </p>
+        </section>
+        <section>
+          <h3>Потеря данных</h3>
+          <p>
+            Еще одна проблема, о которой не сразу и подумаешь, это сбой
+            (например, нет доступа к базе данных, или ошибка в коде,
+            выбрасывающая исключение) при котором мы не можем сохранить запрос и
+            повторить попытку.
+          </p>
+        </section>
+        <section>
+          <h3>Что такое задача и очередь</h3>
+          <p>
+            В двух словах, Задача — это кусок кода (например, метод), который мы
+            хотим выполнить. И мы помещаем его в Очередь, чтобы отложить его
+            выполнение и делегировать «чему-то другому».
+          </p>
+        </section>
+        <section>
+          <h3>Конечная цель</h3>
+          <p>
+            нам просто нужно убедиться, что POST-запрос получен, а затем
+            делегировать оставшуюся часть работы другой части приложения
+          </p>
+        </section>
+        <section>
+          <h3>Небольшой пример с dispatch</h3>
+          <pre>
+            <code data-line-numbers="">dispatch(function () use ($parameters) {
+    // ваш код здесь
+});
+            </code>
+          </pre>
+        </section>
+        <section>
+          <h3>Можно лучше</h3>
+          <p>
+            Но лучше создать выделенный класс задач и затем отправить его вместо
+            этого. Для создания такого класса нам нужно выполнить следующую
+            команду:
+          </p>
+          <pre><code data-line-numbers="">php artisan make:job TrackHitJob</code></pre>
+          <p>Она сгенерирует следующий класс: App\Jobs\TrackHitJob</p>
+        </section>
+        <section>
+          <h3>Перемещаем код</h3>
+          <p>
+            Давайте переместим наш код, из метода track контроллера
+            TrackingController в метод handle класса TrackHitJob
+          </p>
+        </section>
+        <section>
+          <h3>Перемещаем код</h3>
+          <pre><code data-line-numbers="">public function handle()
+{
+    $tracker = Tracker::where('public_id', $tracker_public_id)->first();
+    if ($tracker) {
+        $url = $request->get('url');
+        $hit = Hit::create(['tracker_id' => $tracker->id, 'url' => $url]);
+        $previousHit = Hit::where('tracker_id', $tracker->id)->orderBy('id', 'desc')->skip(1)->first();
+        if ($previousHit) {
+            $previousHit->seconds = $hit->created_at->diffInSeconds($previousHit->created_at);
+            $previousHit->save();
+            return $previousHit->seconds;
+        }
+        return 0;
+    }
+    return -1;
+}</code></pre>
+        </section>
+        <section>
+          <h3>Аргументы</h3>
+          <p>
+            Но как передать аргументы (публичный ID трекера и сам запрос) в код
+            отслеживания?
+          </p>
+        </section>
+        <section>
+          <h3>Аргументы</h3>
+          <pre><code data-line-numbers="5-6|8-12|14-28">class TrackHitJob implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    private string $trackerPublicID;
+    private string $url;
+
+    public function __construct(string $tracker_public_id, Request $request)
+    {
+        $this->trackerPublicID = $tracker_public_id;
+        $this->url = $request->get('url');
+    }
+
+    public function handle()
+    {
+        $tracker = Tracker::where('public_id', $this->trackerPublicID)->first();
+        if ($tracker) {
+            $hit = Hit::create(['tracker_id' => $tracker->id, 'url' => $this->url]);
+            $previousHit = Hit::where('tracker_id', $tracker->id)->orderBy('id', 'desc')->skip(1)->first();
+            if ($previousHit) {
+            $previousHit->seconds = $hit->created_at->diffInSeconds($previousHit->created_at);
+            $previousHit->save();
+            return $previousHit->seconds;
+            }
+            return 0;
+        }
+        return -1;
+    }
+}</code></pre>
+        </section>
+        <section>
+          <h3>Наш контроллер</h3>
+          <pre><code data-line-numbers="">namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use App\Jobs\TrackHitJob;
+
+class TrackingController extends Controller
+{
+    public function track($tracker_public_id, Request $request)
+    {
+        TrackHitJob::dispatch($tracker_public_id, $request);
+    }
+}</code></pre>
+        </section>
+        <section>
+          <h3>Неожиданное поведение</h3>
+          <p>
+            Если вы попытаетесь отправить POST-запрос так же как вначале, то мы
+            не заметим разницы. Мы всё также видим заходы в таблицы hits. Запрос
+            все также, как и в прошлый раз, занимает примерно то же самое время
+            (~100 мс).
+          </p>
+        </section>
+        <section>
+          <h3>Работа очередей в Laravel</h3>
+          <p>
+            Если открыть файл .env, то обнаружите, что у нас есть переменная
+            QUEUE_CONNECTION равная ‘sync’
+          </p>
+          <pre><code data-line-numbers="">QUEUE_CONNECTION=sync</code></pre>
+          <p>
+            это означает, что мы обрабатываем любые Задачи сразу после их
+            отправки и делаем это синхронно.
+          </p>
+        </section>
+        <section>
+          <h3>Работа очередей в Laravel</h3>
+          <p>
+            Eсли мы хотим получить выгоду от использования очередей, то нам
+            нужно подключить их к чему-то другому. Другими словами, нам нужно
+            место, куда мы можем «поставить в очередь»/сохранить задачи до их
+            обработки.
+          </p>
+        </section>
+        <section>
+          <h3>Варианты выбора</h3>
+          <p>
+            Есть несколько вариантов. Если вы посмотрите в файл
+            config/queue.php, то увидите, что Laravel из коробки поддерживает
+            сразу несколько видов подключений (“sync”, “database”, “beanstalkd”,
+            “sqs”, “redis”).
+          </p>
+        </section>
+        <section>
+          <h3>Вариант с базой данных</h3>
+          <p>
+            Каждый раз, когда мы получаем новую Задачу, она будет сохраняться в
+            базе данных (в специальной таблице). И потом уже оттуда она будет
+            взята и обработана.
+          </p>
+        </section>
+        <section>
+          <h3>Вариант с базой данных</h3>
+          <pre><code data-line-numbers="">QUEUE_CONNECTION=database</code></pre>
+        </section>
+        <section>
+          <h3>Создание таблицы в бд для очередей</h3>
+          <p>Нужно создать таблицу, в которой будут храниться задачи</p>
+          <pre><code>php artisan queue:table
+php artisan migrate</code></pre>
+        </section>
+        <section>
+          <h3>Результат использования базы данных</h3>
+          <p>Теперь, если отправить запрос POST еще раз, мы увидим следующее:</p>
+          <ul>
+            <li>время ответа стало меньше (поскольку теперь обработка запроса не синхронна).</li>
+            <li>мы можем увидеть новую запись в таблице:</li>
+          </ul>
+          <img src="img/db-jobs.png" alt="">
+        </section>
+        <section>
+          <h3>Неожиданный резултат №2</h3>
+          <p>В таблице hits новых записей нет.</p>
+        </section>
+        <section>
+          <h3>Обработка задач</h3>
+          <p>их нет, потому что у нас нет никаких процессов обрабатывающих задачи из очереди. Для этого нужно выполнить следующую команду:</p>
+          <pre><code data-line-numbers="">php artisan queue:work</code></pre>
+          <img src="img/jobs-processed.png" alt="">
+        </section>
+        <section>
+          <h3>Команда продолжает работать</h3>
+          <p>Команда не завершается, она будет ожидать новых задач для обработки</p>
+        </section>
+        <section>
+          <h3>Параллельная обработка</h3>
+          <p>Для того чтобы команды выполнялились параллельно нужно открыть новую вкладку терминала и выполнить ту же самую команду <code>php artisan queue:work</code></p>
+          <p>В следующий раз, когда вы отправите несколько POST-запросов в ваше приложение и у вас появится несколько задач в очереди, то заметите, что процессы на обеих вкладках обрабатывают задачи, а это значит, что они обрабатываются параллельно, и чем больше у вас процессов, тем быстрее вы очищаете свою очередь.</p>
+        </section>
+        <section>
+          <h3>Работа с проваленными задачами (failed jobs)</h3>
+          <p>
+            Представьте, что вы добавили на свой сервер новый код, который привел к ошибке. Прежде, чем вы её обнаружили прошло некоторое время, а это означает, что все запросы, полученные вашим приложением за этот период, просто не были обработаны. Есть ли способ их не потерять и обработать позже, после исправления вашей ошибки? Ведь нельзя просто попросить своего клиента повторно отправить вам свои запросы (это просто невозможно). К счастью, данные не теряются, и мы можем без проблем повторить попытку обработки проваленных задач.
+          </p>
+        </section>
+        <section>
+          <h3>Создание таблицы для failed jobs</h3>
+          <p>Когда обработка задачи неудачна, то она сохраняется в таблице failed_jobs. У Laravel есть команда, которая создает миграцию для этой таблицы:</p>
+          <pre><code data-line-numbers="">php artisan queue:failed-table</code></pre>
+        </section>
+        <section>
+          <h3>Попробуем сымитировать неуданую задачу</h3>
+          <p>Добавим следующую строку в начало метода handle():</p>
+          <pre><code data-line-numbers="">throw new \Exception("Error Processing the job", 1);</code></pre>
+        </section>
+        <section>
+          <h3>Запуск неудачных задач</h3>
+          <p>
+            Обработка задачи будет каждый раз завершаться неудачно. Отправим несколько новых POST-запросов и посмотрим, что произойдет.
+          </p>
+          <img src="img/failed-jobs.png" alt="">
+        </section>
+        <section>
+          <h3>Неудачные задачи в бд</h3>
+          <img src="img/failed-jobs-db.png" alt="">
+        </section>
+        <section>
+          <h3>Перезапуск failed jobs</h3>
+          <pre><code data-line-numbers="">php artisan queue:retry all</code></pre>
+        </section>
+        <section>
+          <h3>Поведение воркеров</h3>
+          <p>Если вы не остановили предыдущий процесс queue:work перед повторной попыткой выполнения задач, вы увидите, что повторные попытки снова завершились неудачно.</p>
+          <p>Воркеры очереди — это долгоживущие процессы, сохраняющие в памяти состояние загруженного приложения. В результате они не могут увидеть изменения вашего кода после своего запуска. Поэтому после развертывания приложения обязательно перезапустите воркеры.</p>
+        </section>
+        <section>
+          <h3>Альтернатива перезапуска</h3>
+          <pre><code data-line-numbers="">php artisan queue:listen</code></pre>
+          <p>Но данная команда не такая эффективная как queue:work</p>
+        </section>
+        <section>
+          <h3>Послыка в конкретную очередь</h3>
+          <pre><code> // Эта задача будет отправлена в дефолтную очередь...
+ Job::dispatch();
+ // Эта задача будет отправлена в очередь "emails"...
+ Job::dispatch()->onQueue('emails');</code></pre>
+        </section>
+        <section>
+          <h3>Обработка конкретной очереди</h3>
+          <p><pre><code data-line-numbers="">php artisan queue:work –queue=emails</code></pre></p>
+          <p><pre><code data-line-numbers="">php artisan queue:work --queue=jobs,emails</code></pre></p>
+        </section>
+      </div>
+    </div>
+
+    <script src="dist/reveal.js"></script>
+    <script src="plugin/notes/notes.js"></script>
+    <script src="plugin/markdown/markdown.js"></script>
+    <script src="plugin/highlight/highlight.js"></script>
+    <script
+      src="https://code.jquery.com/jquery-3.7.1.min.js"
+      integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo="
+      crossorigin="anonymous"
+    ></script>
+    <script>
+      // More info about initialization & config:
+      // - https://revealjs.com/initialization/
+      // - https://revealjs.com/config/
+      Reveal.initialize({
+        hash: true,
+        touch: true,
+        // Learn about plugins: https://revealjs.com/plugins/
+        plugins: [RevealMarkdown, RevealHighlight, RevealNotes],
+      });
+
+      // $("pre code").each(function(){
+      //     var html = $(this).html();
+      //     var pattern = html.match(/\s*\n[\t\s]*/);
+      //     $(this).html(html.replace(new RegExp(pattern, "g"),'\n'));
+      // });
+    </script>
+  </body>
+</html>
